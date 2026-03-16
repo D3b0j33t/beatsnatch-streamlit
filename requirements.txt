@@ -1,0 +1,7 @@
+streamlit>=1.33.0
+shazamio
+yt-dlp
+requests
+colorama
+tqdm
+pyaudio
