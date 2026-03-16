@@ -632,8 +632,14 @@ def recognize_song(audio_bytes):
 #         return None
 
 def download_mp3_bytes(title, artist):
-    query    = f"ytsearch1:{title} {artist} audio"
+    query = f"ytsearch1:{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
+
+    # Absolute cookie path (same folder as this script)
+    cookie_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "yt-cookies.txt"
+    )
 
     # Each tuple is tried in order until one succeeds
     client_attempts = [
@@ -645,21 +651,28 @@ def download_mp3_bytes(title, artist):
 
     for clients in client_attempts:
         with tempfile.TemporaryDirectory() as tmpdir:
+
             ydl_opts = {
                 "format": "bestaudio/best",
                 "outtmpl": os.path.join(tmpdir, "song.%(ext)s"),
+
+                **({"cookiefile": cookie_path} if os.path.exists(cookie_path) else {}),
+
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
                     "preferredquality": "192",
                 }],
+
                 "prefer_ffmpeg": True,
                 "quiet": True,
                 "no_warnings": True,
                 "noplaylist": True,
+
                 "extractor_args": {
                     "youtube": {"player_client": clients}
                 },
+
                 "http_headers": {
                     "User-Agent": (
                         "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
@@ -668,13 +681,17 @@ def download_mp3_bytes(title, artist):
                     ),
                 },
             }
+
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([query])
+
                 mp3 = os.path.join(tmpdir, "song.mp3")
+
                 if os.path.exists(mp3):
                     with open(mp3, "rb") as f:
                         return f.read(), filename
+
             except Exception:
                 continue  # try next client
 
