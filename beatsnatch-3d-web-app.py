@@ -621,36 +621,55 @@ def recognize_song(audio_bytes):
     finally:
         os.unlink(tmp)
 
-def search_youtube_id(title, artist):
-    q = quote(f"{title} {artist} audio")
-    try:
-        r = requests.get(f"https://www.youtube.com/results?search_query={q}",
-                         headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-        m = re.search(r"watch\?v=(\S{11})", r.text)
-        return m.group(1) if m else None
-    except Exception:
-        return None
+# def search_youtube_id(title, artist):
+#     q = quote(f"{title} {artist} audio")
+#     try:
+#         r = requests.get(f"https://www.youtube.com/results?search_query={q}",
+#                          headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+#         m = re.search(r"watch\?v=(\S{11})", r.text)
+#         return m.group(1) if m else None
+#     except Exception:
+#         return None
 
 def download_mp3_bytes(title, artist):
-    vid_id = search_youtube_id(title, artist)
-    if not vid_id: return None, ""
+    query = f"{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
+
     with tempfile.TemporaryDirectory() as tmpdir:
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "song.%(ext)s"),
-            "postprocessors": [{"key":"FFmpegExtractAudio","preferredcodec":"mp3","preferredquality":"192"}],
-            "prefer_ffmpeg": True, "quiet": True, "no_warnings": True,
-            **({"cookiefile":"yt-cookies.txt"} if os.path.exists("yt-cookies.txt") else {}),
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            "prefer_ffmpeg": True,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            # Use ytsearch instead of direct URL — avoids the 403
+            "default_search": "ytsearch1",
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://www.youtube.com/",
+            },
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["web", "android"],
+                }
+            },
+            **({"cookiefile": "yt-cookies.txt"} if os.path.exists("yt-cookies.txt") else {}),
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([f"https://www.youtube.com/watch?v={vid_id}"])
+                ydl.download([query])
         except Exception as e:
-            st.error(f"yt-dlp error: {e}"); return None, ""
+            st.error(f"yt-dlp error: {e}")
+            return None, ""
+
         mp3 = os.path.join(tmpdir, "song.mp3")
-        if not os.path.exists(mp3): return None, ""
-        with open(mp3,"rb") as f:
+        if not os.path.exists(mp3):
+            return None, ""
+        with open(mp3, "rb") as f:
             return f.read(), filename
 
 # ══════════════════════════════════════════════════════════════════════════════
