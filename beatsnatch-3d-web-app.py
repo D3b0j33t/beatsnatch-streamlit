@@ -4,9 +4,11 @@ import glob
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from shazamio import Shazam
-import yt_dlp
+from pytubefix import YouTube
+from pytubefix.exceptions import VideoUnavailable, AgeRestrictedError
 from urllib.parse import quote
 
 st.set_page_config(
@@ -567,42 +569,13 @@ def recognize_song(audio_bytes: bytes):
         os.unlink(tmp)
 
 
-def _find_cookie_file() -> str | None:
-    """
-    Search several sensible locations for yt-cookies.txt.
-    Returns the first path that exists, or None.
-    """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(script_dir, "yt-cookies.txt"),          # same folder as app.py
-        os.path.join(os.getcwd(), "yt-cookies.txt"),          # current working dir
-        os.path.expanduser("~/yt-cookies.txt"),               # home directory
-        "/etc/yt-cookies.txt",                                # system-wide (Docker / cloud)
-        os.path.join(os.path.expanduser("~"), ".config",
-                     "yt-dlp", "cookies.txt"),                # yt-dlp XDG path
-    ]
-    return next((p for p in candidates if os.path.isfile(p)), None)
-
-
-# Bot-detection phrases yt-dlp surfaces in exception messages
-_BOT_HINTS = (
-    "sign in", "bot", "confirm you're not", "429",
-    "too many requests", "cookies", "po_token",
-    "proof of origin", "precondition", "403",
-)
-
-def _is_bot_error(err_msg: str) -> bool:
-    low = err_msg.lower()
-    return any(h in low for h in _BOT_HINTS)
 
 
 def _scrape_youtube_id(title: str, artist: str) -> str | None:
     """
-    Scrape YouTube's HTML search results page to get the first video ID.
-
-    This intentionally bypasses yt-dlp's `ytsearch:` / innertube search API,
-    which returns 0 results from Streamlit Cloud's datacenter IP addresses.
-    A plain HTTPS GET to the search results page works fine from any IP.
+    Scrape YouTube's HTML search results page for the first video ID.
+    Uses a plain browser-style GET — works from datacenter IPs where
+    yt-dlp's innertube search API returns 0 results.
     """
     import requests as _req
     q = quote(f"{title} {artist}")
@@ -617,236 +590,109 @@ def _scrape_youtube_id(title: str, artist: str) -> str | None:
     }
     try:
         r = _req.get(url, headers=headers, timeout=15)
-        # YouTube embeds video metadata as JSON inside the HTML
         ids = re.findall(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', r.text)
-        # De-duplicate while preserving order
         seen: set[str] = set()
-        unique = [i for i in ids if not (i in seen or seen.add(i))]  # type: ignore[func-returns-value]
+        unique = [i for i in ids if not (i in seen or seen.add(i))]
         return unique[0] if unique else None
     except Exception:
         return None
 
 
-def _find_ffmpeg() -> str | None:
-    """
-    Locate the ffmpeg binary. Checks PATH first, then common fixed paths used
-    by Streamlit Cloud (Debian-based) and Docker images.
-    """
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    fixed = [
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/opt/conda/bin/ffmpeg",
-        "/home/appuser/.local/bin/ffmpeg",
-        "/app/.heroku/python/bin/ffmpeg",
-    ]
-    return next((p for p in fixed if os.path.isfile(p)), None)
-
-
-def _pick_raw_audio(tmpdir: str) -> str | None:
-    """Return the first raw audio file yt-dlp downloaded (before any conversion)."""
-    for ext in ("webm", "m4a", "opus", "ogg", "wav", "mp3", "mp4"):
-        hits = glob.glob(os.path.join(tmpdir, f"*.{ext}"))
-        if hits:
-            return hits[0]
-    return None
-
-
 def _convert_to_mp3(ffmpeg: str, src: str, dst: str) -> str:
-    """
-    Run ffmpeg directly via subprocess to convert src → dst (mp3 192k).
-    Returns "" on success, or the stderr output on failure.
-    """
-    import subprocess
+    """Convert src audio file to MP3 via a direct subprocess call.
+    Returns empty string on success, or the stderr on failure."""
     result = subprocess.run(
-        [
-            ffmpeg, "-y",
-            "-i", src,
-            "-vn",                   # drop video stream
-            "-ar", "44100",          # sample rate
-            "-ac", "2",              # stereo
-            "-b:a", "192k",          # bitrate
-            dst,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
+        [ffmpeg, "-y", "-i", src, "-vn",
+         "-ar", "44100", "-ac", "2", "-b:a", "192k", dst],
+        capture_output=True, text=True, timeout=120,
     )
     if result.returncode != 0:
-        return result.stderr[-600:] or result.stdout[-600:]
+        return result.stderr[-800:] or result.stdout[-800:]
     return ""
-
-
-class _YTLogger:
-    """Capture every yt-dlp log line so we can surface real errors to the user."""
-    def __init__(self):
-        self.lines: list[str] = []
-    def debug(self, msg):
-        self.lines.append(msg)
-    def info(self, msg):
-        self.lines.append(msg)
-    def warning(self, msg):
-        self.lines.append(f"[warning] {msg}")
-    def error(self, msg):
-        self.lines.append(f"[error] {msg}")
-    def full(self) -> str:
-        return "\n".join(self.lines[-60:])
 
 
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
-    Three-stage pipeline:
-      Stage 0 — scrape YouTube HTML search to get a direct video ID.
-                This bypasses yt-dlp's innertube ytsearch: API which returns
-                0 results from Streamlit Cloud datacenter IPs.
-      Stage 1 — yt-dlp downloads raw best-audio from the direct watch URL.
-      Stage 2 — ffmpeg converts the raw audio to MP3 via subprocess.
-    """
-    filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
+    Download a YouTube audio stream using pytubefix (pure-Python cipher solver —
+    no Node.js / JS runtime required, no PO token, no cookies needed).
 
-    cookie_path = _find_cookie_file()
+    Pipeline:
+      1. Scrape YouTube HTML search → video ID
+      2. pytubefix fetches the audio stream (solves sig in Python)
+      3. ffmpeg converts the raw audio → 192 kbps MP3
+    """
+    filename  = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
     ffmpeg_path = _find_ffmpeg()
 
     if not ffmpeg_path:
         st.error(
             "**FFmpeg not found.**\n\n"
-            "Add `ffmpeg` to `packages.txt` in your repo root and redeploy."
+            "Add `ffmpeg` and `libavcodec-extra` to `packages.txt` and redeploy."
         )
         return None, ""
 
-    # ── Stage 0: get video ID via HTML scrape ──────────────────────────────
+    # ── Stage 1: find video ID ──────────────────────────────────────────────
     video_id = _scrape_youtube_id(title, artist)
     if not video_id:
         st.error(
             "**Could not find the song on YouTube.**\n\n"
-            "The YouTube search page returned no results. "
-            "This is unusual — please try again in a moment."
+            "YouTube search returned no results — please try again."
         )
         return None, ""
 
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # tv / mediaconnect bypass sig/nsig JS challenges and need no PO token —
-    # they work from datacenter IPs where web/mweb/web_creator all fail.
-    # web_safari is a good fallback as it often skips the challenge too.
-    # Clients that require cookies (ios, android) are excluded here because
-    # our cookies are routinely rotated and they add no value when tv works.
-    CLIENT_LADDER = [
-        ["tv"],
-        ["mediaconnect"],
-        ["web_safari"],
-        ["web"],
-        ["mweb"],
-        ["web_creator"],
-    ]
+    # ── Stage 2: download raw audio via pytubefix ───────────────────────────
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            yt = YouTube(watch_url, use_oauth=False, allow_oauth_cache=False)
 
-    base_opts: dict = {
-        # Prefer m4a (format 140) — always available, no sig required on tv client.
-        # Fall back through opus/webm/any audio, then any format as last resort.
-        "format"          : "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-        "quiet"           : False,
-        "no_warnings"     : False,
-        "noplaylist"      : True,
-        "socket_timeout"  : 20,
-        "retries"         : 3,
-        "fragment_retries": 3,
-        "http_headers"    : {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Mobile Safari/537.36"
-            ),
-        },
-    }
-    # Only pass cookies for clients that actually accept them
-    COOKIE_CLIENTS = {"web", "mweb", "web_creator", "web_safari", "mediaconnect"}
-    _base_cookie_path = cookie_path  # stash for per-client use below
-
-    last_err    = ""
-    bot_blocked = False
-    all_logs: list[str] = []
-
-    # ── Stage 1: download raw audio ────────────────────────────────────────
-    for clients in CLIENT_LADDER:
-        logger = _YTLogger()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            opts = {
-                **base_opts,
-                "outtmpl"       : os.path.join(tmpdir, "song.%(ext)s"),
-                "extractor_args": {"youtube": {"player_client": clients}},
-                "logger"        : logger,
-            }
-            # Only attach cookies for clients that accept them
-            if _base_cookie_path and any(c in COOKIE_CLIENTS for c in clients):
-                opts["cookiefile"] = _base_cookie_path
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([watch_url])
-            except yt_dlp.utils.DownloadError as exc:
-                last_err = str(exc)
-                if _is_bot_error(last_err):
-                    bot_blocked = True
-                all_logs.append(
-                    f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}"
-                )
-                continue
-            except Exception as exc:
-                last_err = str(exc)
-                all_logs.append(
-                    f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}"
-                )
-                continue
-
-            raw = _pick_raw_audio(tmpdir)
-            if not raw:
-                all_logs.append(
-                    f"=== client {clients} — no file produced ===\n{logger.full()}"
-                )
-                continue
-
-            # ── Stage 2: convert to MP3 ────────────────────────────────────
-            mp3_out = os.path.join(tmpdir, "out.mp3")
-            ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw, mp3_out)
-            if ffmpeg_err:
+            # Pick the highest-bitrate audio-only stream
+            stream = (
+                yt.streams
+                  .filter(only_audio=True)
+                  .order_by("abr")
+                  .last()
+            )
+            if stream is None:
+                # Fallback: any stream at all
+                stream = yt.streams.filter(only_audio=True).first()
+            if stream is None:
                 st.error(
-                    "**FFmpeg conversion failed.**\n\n"
-                    f"```\n{ffmpeg_err}\n```\n\n"
-                    "Add `libavcodec-extra` to `packages.txt` and redeploy."
+                    "**No audio stream found.**\n\n"
+                    "This video may be age-restricted or unavailable in the server region."
                 )
                 return None, ""
 
-            with open(mp3_out, "rb") as fh:
-                return fh.read(), filename
+            raw_path = stream.download(output_path=tmpdir, filename="raw_audio")
 
-    # ── All clients exhausted ──────────────────────────────────────────────
-    combined_log = "\n\n".join(all_logs)
+        except AgeRestrictedError:
+            st.error(
+                "**Age-restricted video** — pytubefix cannot download it without login.\n\n"
+                "Try a different version of the song."
+            )
+            return None, ""
+        except VideoUnavailable:
+            st.error("**Video unavailable** — it may have been removed or region-blocked.")
+            return None, ""
+        except Exception as exc:
+            st.error(f"**Download failed.**\n\n```\n{exc}\n```")
+            return None, ""
 
-    if bot_blocked:
-        st.error(
-            "**YouTube is blocking the download** (sign-in / bot check).\n\n"
-            "Your `yt-cookies.txt` is stale — re-export it from the browser "
-            "while logged into YouTube, commit the new file, and redeploy."
-        )
-    elif not cookie_path:
-        st.error(
-            "**No cookie file found** and YouTube requires authentication.\n\n"
-            "Export cookies with "
-            "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/"
-            "get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)"
-            ", save as `yt-cookies.txt` in the repo root, commit, and redeploy."
-        )
-    elif last_err:
-        st.error(f"**Download failed.**\n\n```\n{last_err[:500]}\n```")
-    else:
-        st.error("**Download failed** — yt-dlp produced no audio file across all player clients.")
+        # ── Stage 3: convert to MP3 ─────────────────────────────────────────
+        mp3_out = os.path.join(tmpdir, "out.mp3")
+        ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw_path, mp3_out)
+        if ffmpeg_err:
+            st.error(
+                "**FFmpeg conversion failed.**\n\n"
+                f"```\n{ffmpeg_err}\n```\n\n"
+                "Add `libavcodec-extra` to `packages.txt` and redeploy."
+            )
+            return None, ""
 
-    if combined_log:
-        with st.expander("🔍 yt-dlp debug log (click to expand)"):
-            st.code(combined_log, language="text")
+        with open(mp3_out, "rb") as fh:
+            return fh.read(), filename
 
-    return None, ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
