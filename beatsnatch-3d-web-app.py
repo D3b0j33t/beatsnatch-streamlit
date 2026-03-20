@@ -1,7 +1,9 @@
 import streamlit as st
 import asyncio
-import re
+import glob
 import os
+import re
+import shutil
 import tempfile
 from shazamio import Shazam
 import yt_dlp
@@ -594,24 +596,66 @@ def _is_bot_error(err_msg: str) -> bool:
     return any(h in low for h in _BOT_HINTS)
 
 
+def _find_ffmpeg() -> str | None:
+    """
+    Locate the ffmpeg binary. Checks PATH first, then common fixed paths used
+    by Streamlit Cloud (Debian-based) and Docker images.
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    fixed = [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/conda/bin/ffmpeg",
+        "/home/appuser/.local/bin/ffmpeg",
+        "/app/.heroku/python/bin/ffmpeg",
+    ]
+    return next((p for p in fixed if os.path.isfile(p)), None)
+
+
+def _pick_audio_file(tmpdir: str) -> str | None:
+    """
+    Return the first audio file produced in tmpdir, preferring .mp3.
+    Glob-based so we handle any extension yt-dlp or ffmpeg may produce.
+    """
+    preferred = os.path.join(tmpdir, "song.mp3")
+    if os.path.exists(preferred):
+        return preferred
+    for ext in ("mp3", "m4a", "opus", "webm", "ogg", "wav"):
+        hits = glob.glob(os.path.join(tmpdir, f"*.{ext}"))
+        if hits:
+            return hits[0]
+    return None
+
+
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
     Search YouTube for `title artist`, download best audio, convert to MP3.
 
     Strategy
     --------
-    1.  Try every player client in ``CLIENT_LADDER`` until one works.
-    2.  If a cookie file is found it is applied to every attempt
-        (cookies dramatically reduce bot-detection blocks).
-    3.  On failure, emit a clear, actionable error rather than a generic one.
+    1.  Explicitly locate ffmpeg so yt-dlp's postprocessor never silently fails.
+    2.  Try every player client in CLIENT_LADDER until one works.
+    3.  Apply cookie file to every attempt if one is found.
+    4.  Use glob-based file discovery to catch any output extension.
+    5.  Show a clear, actionable error on failure.
     """
     query    = f"ytsearch1:{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
 
     cookie_path = _find_cookie_file()
+    ffmpeg_path = _find_ffmpeg()
 
-    # Most-reliable clients first; web_creator / mediaconnect also work on
-    # some deployments — kept as last-resort fallbacks.
+    if not ffmpeg_path:
+        st.error(
+            "**FFmpeg not found** — audio conversion is impossible without it.\n\n"
+            "Make sure your repo has a `packages.txt` file in the root with one line:\n"
+            "```\nffmpeg\n```\n"
+            "Then redeploy the app on Streamlit Cloud."
+        )
+        return None, ""
+
     CLIENT_LADDER = [
         ["web"],
         ["android_music"],
@@ -623,20 +667,22 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     ]
 
     base_opts: dict = {
-        "format"       : "bestaudio/best",
-        "postprocessors": [{
+        "format"         : "bestaudio/best",
+        "postprocessors" : [{
             "key"             : "FFmpegExtractAudio",
             "preferredcodec"  : "mp3",
             "preferredquality": "192",
         }],
-        "prefer_ffmpeg" : True,
-        "quiet"         : True,
-        "no_warnings"   : True,
-        "noplaylist"    : True,
-        "socket_timeout": 20,
-        "retries"       : 3,
+        # Explicitly pass ffmpeg path — critical on Streamlit Cloud
+        "ffmpeg_location" : ffmpeg_path,
+        "prefer_ffmpeg"   : True,
+        "quiet"           : True,
+        "no_warnings"     : True,
+        "noplaylist"      : True,
+        "socket_timeout"  : 20,
+        "retries"         : 3,
         "fragment_retries": 3,
-        "http_headers"  : {
+        "http_headers"    : {
             "User-Agent": (
                 "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -662,16 +708,15 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([query])
 
-                mp3 = os.path.join(tmpdir, "song.mp3")
-                if os.path.exists(mp3):
-                    with open(mp3, "rb") as fh:
+                found = _pick_audio_file(tmpdir)
+                if found:
+                    with open(found, "rb") as fh:
                         return fh.read(), filename
 
             except yt_dlp.utils.DownloadError as exc:
                 last_err = str(exc)
                 if _is_bot_error(last_err):
                     bot_blocked = True
-                # Continue to next client regardless
                 continue
             except Exception as exc:
                 last_err = str(exc)
@@ -683,13 +728,16 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
             "**YouTube blocked the download** (bot / sign-in required).\n\n"
             "**Fix:** export your YouTube cookies with the "
             "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
-            "Chrome extension, save the file as **`yt-cookies.txt`** and place it "
-            "in the same folder as `app.py`, then restart the app."
+            "Chrome extension, save the file as **`yt-cookies.txt`** in the same "
+            "folder as `app.py`, commit it, then redeploy."
         )
     elif last_err:
         st.error(f"Download failed — {last_err[:300]}")
     else:
-        st.error("Download failed — the audio file was not produced. Is FFmpeg installed?")
+        st.error(
+            f"Download failed — ffmpeg found at `{ffmpeg_path}` but produced no output. "
+            "Check that the ffmpeg build supports mp3 encoding (libmp3lame)."
+        )
 
     return None, ""
 
