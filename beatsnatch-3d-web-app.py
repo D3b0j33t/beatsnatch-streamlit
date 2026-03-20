@@ -569,6 +569,20 @@ def recognize_song(audio_bytes: bytes):
         os.unlink(tmp)
 
 
+def _find_ffmpeg() -> str | None:
+    """Locate the ffmpeg binary via PATH then common fixed locations."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for p in [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/conda/bin/ffmpeg",
+        "/home/appuser/.local/bin/ffmpeg",
+    ]:
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def _scrape_youtube_id(title: str, artist: str) -> str | None:
