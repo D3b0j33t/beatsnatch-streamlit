@@ -742,7 +742,7 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
-for _k, _v in {"song": None, "mp3_bytes": None, "mp3_filename": ""}.items():
+for _k, _v in {"song": None, "mp3_bytes": None, "mp3_filename": "", "video_id": None}.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -810,19 +810,22 @@ st.markdown("</div>", unsafe_allow_html=True)
 # ── RECOGNITION ─────────────────────────────────────────────────────────────
 if identify_clicked and raw:
     # Reset previous results
-    st.session_state.song       = None
-    st.session_state.mp3_bytes  = None
+    st.session_state.song        = None
+    st.session_state.mp3_bytes   = None
     st.session_state.mp3_filename = ""
+    st.session_state.video_id    = None
 
     with st.spinner("Analyzing the audio…"):
         result = recognize_song(raw)
 
     if result and "track" in result:
         track = result["track"]
-        st.session_state.song = {
-            "title" : track.get("title",    "Unknown Title"),
-            "artist": track.get("subtitle", "Unknown Artist"),
-        }
+        t = track.get("title",    "Unknown Title")
+        a = track.get("subtitle", "Unknown Artist")
+        st.session_state.song = {"title": t, "artist": a}
+        # Grab video ID right away so the embed is ready immediately
+        with st.spinner("Finding on YouTube…"):
+            st.session_state.video_id = _scrape_youtube_id(t, a)
     else:
         st.markdown(
             '<p class="bs-status e">&#10060; Not recognized — try a longer clip.</p>',
@@ -831,12 +834,13 @@ if identify_clicked and raw:
 
 # ── SONG CARD ───────────────────────────────────────────────────────────────
 if st.session_state.song:
-    s      = st.session_state.song
-    title  = s["title"]
-    artist = s["artist"]
-    sp_url = f"https://open.spotify.com/search/{quote(title + ' ' + artist)}"
-    yt_url = f"https://www.youtube.com/results?search_query={quote(title + ' ' + artist)}"
+    s       = st.session_state.song
+    title   = s["title"]
+    artist  = s["artist"]
+    vid     = st.session_state.video_id          # may be None if scrape failed
+    sp_url  = f"https://open.spotify.com/search/{quote(title + ' ' + artist)}"
 
+    # Song meta header
     st.markdown(f"""
     <div class="bs-glass bs-song-card">
       <div class="bs-song-inner">
@@ -847,36 +851,93 @@ if st.session_state.song:
           <div class="bs-sartist">{artist}</div>
         </div>
       </div>
-      <div class="bs-sep"></div>
-      <div class="bs-links">
-        <a class="bs-btn bs-sp" href="{sp_url}" target="_blank" rel="noopener">&#9654;&nbsp;Spotify</a>
-        <a class="bs-btn bs-yt" href="{yt_url}" target="_blank" rel="noopener">&#9654;&nbsp;YouTube</a>
-      </div>
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("Fetch the Song", use_container_width=True, key="prep_dl"):
-        with st.spinner(f'Fetching "{title}" and converting to MP3…'):
+    # ── YouTube embed (audio-player style) ──────────────────────────────────
+    if vid:
+        # Wrap iframe in a container that clips to ~80 px to hide the video
+        # thumbnail and show only the YouTube control bar at the bottom.
+        st.components.v1.html(f"""
+        <style>
+          .yt-wrap {{
+            width: 100%;
+            height: 80px;
+            overflow: hidden;
+            border-radius: 14px;
+            border: 1px solid rgba(0,255,204,.18);
+            background: #000;
+            position: relative;
+            box-shadow: 0 4px 22px rgba(0,0,0,.6);
+            margin: 10px 0 4px;
+          }}
+          .yt-wrap iframe {{
+            width: 100%;
+            /* tall enough for YouTube to render, shifted up so only
+               the control bar (bottom ~80 px) is visible               */
+            height: 340px;
+            margin-top: -260px;
+            border: none;
+            display: block;
+          }}
+          .yt-label {{
+            font-family: 'Inter', sans-serif;
+            font-size: .65rem;
+            color: rgba(0,255,204,.45);
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 4px 0 0;
+          }}
+        </style>
+        <div class="yt-wrap">
+          <iframe
+            src="https://www.youtube-nocookie.com/embed/{vid}?autoplay=0&controls=1&modestbranding=1&rel=0&playsinline=1"
+            allow="autoplay; encrypted-media"
+            allowfullscreen>
+          </iframe>
+        </div>
+        <p class="yt-label">▶ preview — audio player</p>
+        """, height=104)
+    else:
+        st.markdown(
+            '<p class="bs-status" style="font-size:.78rem;padding:6px 0 2px">'
+            '⚠️ Could not find the video on YouTube</p>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Links row ────────────────────────────────────────────────────────────
+    yt_url = (f"https://www.youtube.com/watch?v={vid}" if vid
+              else f"https://www.youtube.com/results?search_query={quote(title+' '+artist)}")
+    st.markdown(f"""
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 4px">
+      <a class="bs-btn bs-sp" href="{sp_url}" target="_blank" rel="noopener">&#9654;&nbsp;Spotify</a>
+      <a class="bs-btn bs-yt" href="{yt_url}"  target="_blank" rel="noopener">&#9654;&nbsp;YouTube</a>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Download button ──────────────────────────────────────────────────────
+    if st.button("⬇ Download MP3", use_container_width=True, key="prep_dl"):
+        with st.spinner(f'Fetching "{title}" via cobalt…'):
             mp3, fname = download_mp3_bytes(title, artist)
         if mp3:
             st.session_state.mp3_bytes    = mp3
             st.session_state.mp3_filename = fname
-        # Error is already shown inside download_mp3_bytes on failure
 
     if st.session_state.mp3_bytes:
         st.markdown('<div class="bs-gap">', unsafe_allow_html=True)
         st.download_button(
-            label         = f"Download MP3  ·  {st.session_state.mp3_filename}",
-            data          = st.session_state.mp3_bytes,
-            file_name     = st.session_state.mp3_filename,
-            mime          = "audio/mpeg",
-            use_container_width=True,
-            key           = "dl_btn",
+            label               = f"Save MP3  ·  {st.session_state.mp3_filename}",
+            data                = st.session_state.mp3_bytes,
+            file_name           = st.session_state.mp3_filename,
+            mime                = "audio/mpeg",
+            use_container_width = True,
+            key                 = "dl_btn",
         )
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown(
             '<p class="bs-status s" style="padding-bottom:.5rem">'
-            "&#10003; Your file is ready — click Download above</p>",
+            "&#10003; Ready — click Save MP3 above</p>",
             unsafe_allow_html=True,
         )
 
