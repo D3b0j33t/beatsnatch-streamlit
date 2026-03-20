@@ -6,7 +6,6 @@ import tempfile
 from shazamio import Shazam
 import yt_dlp
 from urllib.parse import quote
-import requests
 
 st.set_page_config(
     page_title="BeatSnatch - By Debojeet",
@@ -41,7 +40,6 @@ STYLE = """
   --rb:       100px;
 }
 
-/* ── Make every Streamlit layer transparent so 3D canvas shows through ── */
 html, body,
 [data-testid="stAppViewContainer"],
 [data-testid="stApp"],
@@ -57,16 +55,13 @@ section[data-testid="stMain"],
   font-family: 'Inter', sans-serif !important;
 }
 
-/* Deep fallback bg colour in case canvas hasn't loaded yet */
 body { background-color: #07070f !important; }
 
-/* Remove any pseudo-element backgrounds */
 [data-testid="stAppViewContainer"]::before,
 [data-testid="stAppViewContainer"]::after { display: none !important; }
 
 [data-testid="stMain"] { position: relative; z-index: 1; }
 
-/* Hide Streamlit chrome */
 #MainMenu, footer, header,
 [data-testid="stToolbar"], [data-testid="stDecoration"],
 [data-testid="stStatusWidget"], [data-testid="stSidebarNav"],
@@ -80,7 +75,6 @@ body { background-color: #07070f !important; }
   padding: clamp(1rem,4vw,2.4rem) clamp(0.9rem,4vw,1.6rem) clamp(2rem,5vw,4rem) !important;
 }
 
-/* fix Streamlit default <p> margins */
 [data-testid="stMarkdownContainer"] p {
   margin-bottom: 0 !important;
   margin-top: 0 !important;
@@ -90,7 +84,6 @@ body { background-color: #07070f !important; }
   text-decoration: none !important;
 }
 
-/* ── HEADER ── */
 .bs-header {
   text-align: center;
   padding: clamp(.4rem,2vw,.9rem) 0 clamp(.3rem,1.5vw,.5rem);
@@ -99,18 +92,7 @@ body { background-color: #07070f !important; }
   display: inline-flex; align-items: center; gap: clamp(8px,2vw,14px);
   margin-bottom: 6px;
 }
-.bs-logo-box {
-  width: clamp(38px,7vw,50px); height: clamp(38px,7vw,50px);
-  border-radius: 13px;
-  background: linear-gradient(135deg, rgba(0,255,204,0.15), rgba(59,108,248,0.12));
-  border: 1px solid rgba(0,255,204,0.3);
-  display: flex; align-items: center; justify-content: center;
-  font-size: clamp(18px,4vw,26px);
-  box-shadow: 0 0 22px rgba(0,255,204,0.18), inset 0 1px 0 rgba(255,255,255,0.1);
-  flex-shrink: 0;
-}
 
-/* h1 — beat Streamlit high-specificity rules */
 .bs-title,
 h1.bs-title,
 [data-testid="stMarkdownContainer"] h1,
@@ -155,14 +137,12 @@ h1.bs-title,
   background: rgba(0,255,204,.1); border-color: rgba(0,255,204,.25); color: var(--primary);
 }
 
-/* ── DIVIDER ── */
 .bs-divider {
   border: none; height: 1px;
   background: linear-gradient(to right, transparent, rgba(0,255,204,.3), rgba(59,108,248,.2), transparent);
   margin: clamp(.7rem,2vw,1.3rem) 0;
 }
 
-/* ── GLASS CARD — stronger backdrop so content is readable over 3D ── */
 .bs-glass {
   background: var(--card);
   backdrop-filter: blur(28px) saturate(160%) brightness(0.9);
@@ -177,7 +157,6 @@ h1.bs-title,
   pointer-events: none;
 }
 
-/* ── RECORD CARD ── */
 .bs-record-card {
   padding: clamp(1.1rem,3vw,1.7rem) clamp(.9rem,3vw,1.7rem) clamp(.9rem,2.5vw,1.4rem);
   border-color: rgba(0,255,204,.14);
@@ -209,7 +188,6 @@ h1.bs-title,
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 
-/* ── AUDIO INPUT ── */
 [data-testid="stAudioInput"] {
   background: rgba(0,0,0,.3) !important;
   border: 1px solid rgba(0,255,204,.16) !important;
@@ -236,7 +214,6 @@ h1.bs-title,
 [data-testid="stAudioInput"] audio,
 [data-testid="stAudio"] audio { border-radius: 10px; width: 100%; }
 
-/* ── BUTTONS ── */
 [data-testid="stButton"] button {
   width: 100% !important;
   background: linear-gradient(135deg, #00d4a8, #0093b8) !important;
@@ -274,7 +251,6 @@ h1.bs-title,
   transform: translateY(-2px) !important; color: #1c1000 !important;
 }
 
-/* ── STATUS ── */
 .bs-status {
   text-align: center;
   font-size: clamp(.8rem,2vw,.9rem) !important;
@@ -286,7 +262,6 @@ h1.bs-title,
 .bs-status.e { color: var(--danger)  !important; }
 .bs-status.s { color: var(--success) !important; }
 
-/* ── SONG CARD ── */
 .bs-song-card {
   padding: clamp(1.1rem,3.5vw,1.7rem);
   border-color: rgba(0,255,204,.16);
@@ -354,7 +329,6 @@ h1.bs-title,
 .bs-yt { background: linear-gradient(135deg,#ff0000,#bb0000) !important; color:#fff !important; box-shadow: 0 4px 15px rgba(255,0,0,.3); }
 .bs-yt:hover { background: linear-gradient(135deg,#ff3333,#ff0000) !important; transform: translateY(-2px); box-shadow: 0 7px 22px rgba(255,0,0,.4); color:#fff !important; }
 
-/* ── DOWNLOAD CARD ── */
 .bs-dl-card {
   border-color: rgba(251,191,36,.16);
   background: rgba(6,5,0,.65);
@@ -363,27 +337,13 @@ h1.bs-title,
   animation: slideUp .4s cubic-bezier(.16,1,.3,1);
   box-shadow: 0 8px 32px rgba(0,0,0,.6);
 }
-.bs-dl-card::after {
-  content: ''; position: absolute; top: 0; left: 40%; right: 40%; height: 1px;
-  background: linear-gradient(to right, transparent, rgba(251,191,36,.55), transparent);
-}
-.bs-dl-top { display: flex; align-items: center; gap: 10px; margin-bottom: clamp(.8rem,2.5vw,1.1rem); }
-.bs-dl-ico {
-  width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
-  background: rgba(251,191,36,.12); border: 1px solid rgba(251,191,36,.24);
-  display: flex; align-items: center; justify-content: center; font-size: 13px;
-}
-.bs-dl-lbl { font-size: clamp(.66rem,1.7vw,.73rem); font-weight: 700; letter-spacing: .17em; text-transform: uppercase; color: rgba(251,191,36,.88) !important; }
-.bs-dl-sub { font-size: clamp(.64rem,1.6vw,.7rem); color: var(--text3) !important; margin-top: 1px; }
 .bs-gap { margin-top: clamp(7px,2vw,11px); }
 
-/* ── LOADER ── */
 .bs-loader { display: flex; gap: clamp(7px,2vw,10px); justify-content: center; align-items: center; padding: clamp(.7rem,2vw,1.1rem) 0 clamp(.3rem,1vw,.5rem); }
 .bs-loader span { width: clamp(8px,2vw,10px); height: clamp(8px,2vw,10px); background: var(--primary); border-radius: 50%; animation: ldBounce 1.4s infinite ease-in-out; box-shadow: 0 0 10px rgba(0,255,204,.5); }
 .bs-loader span:nth-child(2) { animation-delay:.18s; opacity:.75; }
 .bs-loader span:nth-child(3) { animation-delay:.36s; opacity:.5; }
 
-/* ── FOOTER ── */
 .bs-footer { margin-top: clamp(1.8rem,4vw,3rem); padding-top: clamp(.9rem,2vw,1.3rem); border-top: 1px solid rgba(255,255,255,.06); text-align: center; }
 .bs-foot-row { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .bs-foot-name { font-size: 1rem; color: var(--text2) !important; font-weight: 500; font-family: 'Orbitron', sans-serif !important; }
@@ -392,12 +352,10 @@ h1.bs-title,
 .bs-foot-link:hover { color: var(--primary) !important; }
 .bs-foot-copy { font-size: 0.8rem; color: var(--text2) !important; opacity: .5; font-family: 'Orbitron', sans-serif !important; }
 
-/* ── SPINNER / ALERT ── */
 [data-testid="stSpinner"] > div { border-top-color: var(--primary) !important; }
 [data-testid="stSpinner"] p { color: var(--text2) !important; font-family:'Inter',sans-serif !important; }
 [data-testid="stAlert"] { border-radius: 12px !important; background: rgba(248,113,113,.08) !important; border: 1px solid rgba(248,113,113,.2) !important; color: var(--danger) !important; }
 
-/* ── RESPONSIVE ── */
 @media (max-width: 460px) {
   .bs-song-inner { flex-direction: column; align-items: center; text-align: center; }
   .bs-art { margin: 0 auto; }
@@ -405,7 +363,6 @@ h1.bs-title,
   .bs-stitle, .bs-sartist { white-space: normal; }
 }
 
-/* ── KEYFRAMES ── */
 @keyframes flicker {
   0%,19%,21%,23%,25%,54%,56%,100% { opacity:1; }
   20%,22%,24%,55% { opacity:.58; }
@@ -425,17 +382,11 @@ h1.bs-title,
 </style>
 """
 
-# ══════════════════════════════════════════════════════════════════════════════
-# THREE.JS BACKGROUND INJECTOR
-# Injects a <canvas> + Three.js directly into window.parent.document.body
-# so it becomes a true full-page fixed background behind all Streamlit content.
-# ══════════════════════════════════════════════════════════════════════════════
 THREEJS_BG_INJECTOR = """
 <script>
 (function(){
   var p = window.parent.document;
 
-  /* ── inject fonts ── */
   if(!p.getElementById('bs-fonts')){
     var lf=p.createElement('link');
     lf.id='bs-fonts'; lf.rel='stylesheet';
@@ -443,10 +394,8 @@ THREEJS_BG_INJECTOR = """
     p.head.appendChild(lf);
   }
 
-  /* ── already injected? skip ── */
   if(p.getElementById('bs-3d-canvas')) return;
 
-  /* ── create fixed canvas ── */
   var canvas = p.createElement('canvas');
   canvas.id  = 'bs-3d-canvas';
   canvas.style.cssText = [
@@ -457,7 +406,6 @@ THREEJS_BG_INJECTOR = """
   ].join(';');
   p.body.prepend(canvas);
 
-  /* ── load Three.js into parent then start scene ── */
   var s = p.createElement('script');
   s.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
   s.onload = function(){ startScene(canvas); };
@@ -489,7 +437,6 @@ THREEJS_BG_INJECTOR = """
     resize();
     window.parent.addEventListener('resize', resize);
 
-    /* floor */
     var grid = new THREE.GridHelper(80,50,0x001a14,0x000d0d);
     grid.position.y = -4; scene.add(grid);
     var floor = new THREE.Mesh(
@@ -498,7 +445,6 @@ THREEJS_BG_INJECTOR = """
     );
     floor.rotation.x=-Math.PI/2; floor.position.y=-4.01; floor.receiveShadow=true; scene.add(floor);
 
-    /* vinyl */
     var disc = new THREE.Mesh(
       new THREE.CylinderGeometry(2.8,2.8,.2,80),
       new THREE.MeshStandardMaterial({color:0x0a0a0a,metalness:.9,roughness:.08})
@@ -513,7 +459,6 @@ THREEJS_BG_INJECTOR = """
       new THREE.MeshStandardMaterial({color:0x00ffcc,emissive:0x00ffcc,emissiveIntensity:.6,metalness:.4,roughness:.3}));
     lbl.position.y=.01; scene.add(lbl);
 
-    /* rings */
     function makeRing(r,tube,col,ei){
       return new THREE.Mesh(new THREE.TorusGeometry(r,tube,16,90),
         new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:ei,transparent:true,opacity:.88}));
@@ -522,7 +467,6 @@ THREEJS_BG_INJECTOR = """
     var bR=makeRing(3.8,.04,0x3b6cf8,1.8); bR.rotation.x=Math.PI/2; scene.add(bR);
     var pR=makeRing(4.5,.035,0x7c3aed,1.5); pR.rotation.x=Math.PI/2; pR.rotation.z=.3; scene.add(pR);
 
-    /* frequency bars */
     var BC=72, BR=6.5, bars=[];
     for(var i=0;i<BC;i++){
       var a=(i/BC)*Math.PI*2, r=(i%3===0)?BR+.4:BR;
@@ -534,7 +478,6 @@ THREEJS_BG_INJECTOR = """
       b.castShadow=true; scene.add(b); bars.push(b);
     }
 
-    /* stars */
     var SC=2000,sp=new Float32Array(SC*3),sc=new Float32Array(SC*3);
     var tC=new THREE.Color(0x00ffcc),bC=new THREE.Color(0x3b6cf8),wC=new THREE.Color(0xffffff);
     for(var i=0;i<SC;i++){
@@ -549,7 +492,6 @@ THREEJS_BG_INJECTOR = """
     var stars=new THREE.Points(sG,new THREE.PointsMaterial({size:.12,vertexColors:true,transparent:true,opacity:.72,sizeAttenuation:true}));
     scene.add(stars);
 
-    /* inner particles */
     var IC=350,ip=new Float32Array(IC*3);
     for(var i=0;i<IC;i++){ip[i*3]=(Math.random()-.5)*14;ip[i*3+1]=(Math.random()-.5)*10;ip[i*3+2]=(Math.random()-.5)*14;}
     var iG=new THREE.BufferGeometry();
@@ -557,7 +499,6 @@ THREEJS_BG_INJECTOR = """
     var iPts=new THREE.Points(iG,new THREE.PointsMaterial({color:0x00ffcc,size:.07,transparent:true,opacity:.5,sizeAttenuation:true}));
     scene.add(iPts);
 
-    /* knots */
     var kd=[{p:[8,2,-4],s:.28,c:0x00ffcc,sp:.008},{p:[-9,3,2],s:.22,c:0x3b6cf8,sp:.011},
             {p:[5,-1,8],s:.18,c:0x7c3aed,sp:.014},{p:[-6,1,-7],s:.2,c:0x00ffcc,sp:.009}];
     var knots=kd.map(function(d){
@@ -567,14 +508,12 @@ THREEJS_BG_INJECTOR = """
       m.position.set(d.p[0],d.p[1],d.p[2]); m.scale.setScalar(d.s); m.userData=d; scene.add(m); return m;
     });
 
-    /* lights */
     scene.add(new THREE.AmbientLight(0x0a0a14,2));
     var mL=new THREE.PointLight(0x00ffcc,3.5,25); mL.position.set(0,4,0); mL.castShadow=true; scene.add(mL);
     var bL=new THREE.PointLight(0x3b6cf8,2.2,20); bL.position.set(-10,4,-6); scene.add(bL);
     var pL=new THREE.PointLight(0x7c3aed,1.8,18); pL.position.set(10,3,6); scene.add(pL);
     var dL=new THREE.DirectionalLight(0x001a10,1.2); dL.position.set(0,10,-10); scene.add(dL);
 
-    /* animate */
     var t=0;
     function sim(i,t){
       var n=i/BC;
@@ -605,119 +544,173 @@ THREEJS_BG_INJECTOR = """
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-def sanitize(name):
+def sanitize(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
-async def _recognize(path):
+
+async def _recognize(path: str):
     return await Shazam().recognize(path)
 
-def recognize_song(audio_bytes):
+
+def recognize_song(audio_bytes: bytes):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(audio_bytes); tmp = f.name
+        f.write(audio_bytes)
+        tmp = f.name
     try:
         return asyncio.run(_recognize(tmp))
     except Exception as e:
-        st.error(f"Recognition error: {e}"); return None
+        st.error(f"Recognition error: {e}")
+        return None
     finally:
         os.unlink(tmp)
 
-# def search_youtube_id(title, artist):
-#     q = quote(f"{title} {artist} audio")
-#     try:
-#         r = requests.get(f"https://www.youtube.com/results?search_query={q}",
-#                          headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-#         m = re.search(r"watch\?v=(\S{11})", r.text)
-#         return m.group(1) if m else None
-#     except Exception:
-#         return None
 
-def download_mp3_bytes(title, artist):
-    query = f"ytsearch1:{title} {artist} audio"
+def _find_cookie_file() -> str | None:
+    """
+    Search several sensible locations for yt-cookies.txt.
+    Returns the first path that exists, or None.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, "yt-cookies.txt"),          # same folder as app.py
+        os.path.join(os.getcwd(), "yt-cookies.txt"),          # current working dir
+        os.path.expanduser("~/yt-cookies.txt"),               # home directory
+        "/etc/yt-cookies.txt",                                # system-wide (Docker / cloud)
+        os.path.join(os.path.expanduser("~"), ".config",
+                     "yt-dlp", "cookies.txt"),                # yt-dlp XDG path
+    ]
+    return next((p for p in candidates if os.path.isfile(p)), None)
+
+
+# Bot-detection phrases yt-dlp surfaces in exception messages
+_BOT_HINTS = (
+    "sign in", "bot", "confirm you're not", "429",
+    "too many requests", "cookies", "po_token",
+    "proof of origin", "precondition", "403",
+)
+
+def _is_bot_error(err_msg: str) -> bool:
+    low = err_msg.lower()
+    return any(h in low for h in _BOT_HINTS)
+
+
+def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
+    """
+    Search YouTube for `title artist`, download best audio, convert to MP3.
+
+    Strategy
+    --------
+    1.  Try every player client in ``CLIENT_LADDER`` until one works.
+    2.  If a cookie file is found it is applied to every attempt
+        (cookies dramatically reduce bot-detection blocks).
+    3.  On failure, emit a clear, actionable error rather than a generic one.
+    """
+    query    = f"ytsearch1:{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
 
-    # Absolute cookie path (same folder as this script)
-    cookie_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "yt-cookies.txt"
-    )
+    cookie_path = _find_cookie_file()
 
-    # Each tuple is tried in order until one succeeds
-    client_attempts = [
+    # Most-reliable clients first; web_creator / mediaconnect also work on
+    # some deployments — kept as last-resort fallbacks.
+    CLIENT_LADDER = [
+        ["web"],
         ["android_music"],
         ["tv_embedded"],
+        ["ios"],
         ["android"],
         ["mweb"],
+        ["web_creator"],
     ]
 
-    for clients in client_attempts:
+    base_opts: dict = {
+        "format"       : "bestaudio/best",
+        "postprocessors": [{
+            "key"             : "FFmpegExtractAudio",
+            "preferredcodec"  : "mp3",
+            "preferredquality": "192",
+        }],
+        "prefer_ffmpeg" : True,
+        "quiet"         : True,
+        "no_warnings"   : True,
+        "noplaylist"    : True,
+        "socket_timeout": 20,
+        "retries"       : 3,
+        "fragment_retries": 3,
+        "http_headers"  : {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Mobile Safari/537.36"
+            ),
+        },
+    }
+
+    if cookie_path:
+        base_opts["cookiefile"] = cookie_path
+
+    last_err    = ""
+    bot_blocked = False
+
+    for clients in CLIENT_LADDER:
         with tempfile.TemporaryDirectory() as tmpdir:
-
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": os.path.join(tmpdir, "song.%(ext)s"),
-
-                **({"cookiefile": cookie_path} if os.path.exists(cookie_path) else {}),
-
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
-
-                "prefer_ffmpeg": True,
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-
-                "extractor_args": {
-                    "youtube": {"player_client": clients}
-                },
-
-                "http_headers": {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Mobile Safari/537.36"
-                    ),
-                },
+            opts = {
+                **base_opts,
+                "outtmpl"       : os.path.join(tmpdir, "song.%(ext)s"),
+                "extractor_args": {"youtube": {"player_client": clients}},
             }
-
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([query])
 
                 mp3 = os.path.join(tmpdir, "song.mp3")
-
                 if os.path.exists(mp3):
-                    with open(mp3, "rb") as f:
-                        return f.read(), filename
+                    with open(mp3, "rb") as fh:
+                        return fh.read(), filename
 
-            except Exception:
-                continue  # try next client
+            except yt_dlp.utils.DownloadError as exc:
+                last_err = str(exc)
+                if _is_bot_error(last_err):
+                    bot_blocked = True
+                # Continue to next client regardless
+                continue
+            except Exception as exc:
+                last_err = str(exc)
+                continue
 
-    st.error("Download failed — all player clients blocked. Try adding a yt-cookies.txt file.")
+    # ── All clients failed — show the most helpful error possible ──
+    if bot_blocked or not cookie_path:
+        st.error(
+            "**YouTube blocked the download** (bot / sign-in required).\n\n"
+            "**Fix:** export your YouTube cookies with the "
+            "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
+            "Chrome extension, save the file as **`yt-cookies.txt`** and place it "
+            "in the same folder as `app.py`, then restart the app."
+        )
+    elif last_err:
+        st.error(f"Download failed — {last_err[:300]}")
+    else:
+        st.error("Download failed — the audio file was not produced. Is FFmpeg installed?")
+
     return None, ""
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
-for k, v in {"song":None,"mp3_bytes":None,"mp3_filename":""}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+for _k, _v in {"song": None, "mp3_bytes": None, "mp3_filename": ""}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown(STYLE, unsafe_allow_html=True)
-
-# Inject Three.js as fixed background + fonts — height=1 to avoid iframe collapse
 st.components.v1.html(THREEJS_BG_INJECTOR, height=1, scrolling=False)
 
-# ── HEADER ─────────────────────────────────────────────────────────────────────
+# ── HEADER ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="bs-header">
   <div class="bs-logo-wrap">
-    <!-- <div class="bs-logo-box">🎵</div> -->
     <h1 class="bs-title">Beatsnatch</h1>
   </div>
   <p class="bs-tagline">Music Recognition &amp; Download</p>
@@ -730,7 +723,7 @@ st.markdown("""
 
 st.markdown('<hr class="bs-divider"/>', unsafe_allow_html=True)
 
-# ── RECORD CARD ────────────────────────────────────────────────────────────────
+# ── RECORD CARD ─────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="bs-glass bs-record-card">
   <div class="bs-rec-hint">
@@ -743,39 +736,61 @@ st.markdown("""
   </div>
 """, unsafe_allow_html=True)
 
+# Audio input widget (Streamlit ≥1.31 has st.audio_input; fall back to uploader)
 try:
     audio_value = st.audio_input("Record audio", label_visibility="collapsed")
 except AttributeError:
-    audio_value = st.file_uploader("Upload a short audio clip",
-        type=["wav","mp3","webm","ogg"], label_visibility="collapsed")
+    audio_value = st.file_uploader(
+        "Upload a short audio clip",
+        type=["wav", "mp3", "webm", "ogg"],
+        label_visibility="collapsed",
+    )
+
+# Read bytes here so they are always in scope for the identify block below
+raw: bytes | None = None
+identify_clicked  = False
 
 if audio_value is not None:
-    raw = audio_value.read() if hasattr(audio_value,"read") else bytes(audio_value)
+    raw = audio_value.read() if hasattr(audio_value, "read") else bytes(audio_value)
     identify_clicked = st.button("Identify Song", use_container_width=True)
 else:
-    identify_clicked = False
-    st.markdown('<p class="bs-status p">Ready — tap the mic above to begin</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="bs-status p">Ready — tap the mic above to begin</p>',
+        unsafe_allow_html=True,
+    )
 
-st.markdown('</div>', unsafe_allow_html=True)
+# Close the record card div — always rendered regardless of audio state
+st.markdown("</div>", unsafe_allow_html=True)
 
-# ── RECOGNITION ────────────────────────────────────────────────────────────────
-if identify_clicked:
-    st.session_state.song = None
-    st.session_state.mp3_bytes = None
-    st.markdown('<div class="bs-loader"><span></span><span></span><span></span></div><p class="bs-status p">Analyzing the audio…</p>', unsafe_allow_html=True)
-    result = recognize_song(raw)
+# ── RECOGNITION ─────────────────────────────────────────────────────────────
+if identify_clicked and raw:
+    # Reset previous results
+    st.session_state.song       = None
+    st.session_state.mp3_bytes  = None
+    st.session_state.mp3_filename = ""
+
+    with st.spinner("Analyzing the audio…"):
+        result = recognize_song(raw)
+
     if result and "track" in result:
         track = result["track"]
-        st.session_state.song = {"title":track.get("title","Unknown Title"),"artist":track.get("subtitle","Unknown Artist")}
+        st.session_state.song = {
+            "title" : track.get("title",    "Unknown Title"),
+            "artist": track.get("subtitle", "Unknown Artist"),
+        }
     else:
-        st.markdown('<p class="bs-status e">&#10060; Not recognized — try a longer clip.</p>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="bs-status e">&#10060; Not recognized — try a longer clip.</p>',
+            unsafe_allow_html=True,
+        )
 
-# ── SONG CARD ──────────────────────────────────────────────────────────────────
+# ── SONG CARD ───────────────────────────────────────────────────────────────
 if st.session_state.song:
-    s = st.session_state.song
-    title, artist = s["title"], s["artist"]
-    sp_url = f"https://open.spotify.com/search/{quote(title+' '+artist)}"
-    yt_url = f"https://www.youtube.com/results?search_query={quote(title+' '+artist)}"
+    s      = st.session_state.song
+    title  = s["title"]
+    artist = s["artist"]
+    sp_url = f"https://open.spotify.com/search/{quote(title + ' ' + artist)}"
+    yt_url = f"https://www.youtube.com/results?search_query={quote(title + ' ' + artist)}"
 
     st.markdown(f"""
     <div class="bs-glass bs-song-card">
@@ -796,30 +811,31 @@ if st.session_state.song:
     """, unsafe_allow_html=True)
 
     if st.button("Fetch the Song", use_container_width=True, key="prep_dl"):
-        with st.spinner(f'Fetching "{title}" and converting…'):
+        with st.spinner(f'Fetching "{title}" and converting to MP3…'):
             mp3, fname = download_mp3_bytes(title, artist)
         if mp3:
-            st.session_state.mp3_bytes = mp3
+            st.session_state.mp3_bytes    = mp3
             st.session_state.mp3_filename = fname
-        else:
-            st.markdown('<p class="bs-status e">&#10060; Download failed.</p>', unsafe_allow_html=True)
+        # Error is already shown inside download_mp3_bytes on failure
 
     if st.session_state.mp3_bytes:
         st.markdown('<div class="bs-gap">', unsafe_allow_html=True)
         st.download_button(
-            label=f"Download MP3  ·  {st.session_state.mp3_filename}",
-            data=st.session_state.mp3_bytes,
-            file_name=st.session_state.mp3_filename,
-            mime="audio/mpeg",
+            label         = f"Download MP3  ·  {st.session_state.mp3_filename}",
+            data          = st.session_state.mp3_bytes,
+            file_name     = st.session_state.mp3_filename,
+            mime          = "audio/mpeg",
             use_container_width=True,
-            key="dl_btn",
+            key           = "dl_btn",
         )
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<p class="bs-status s" style="padding-bottom:.5rem">&#10003; Your file is ready — click Download above</p>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(
+            '<p class="bs-status s" style="padding-bottom:.5rem">'
+            "&#10003; Your file is ready — click Download above</p>",
+            unsafe_allow_html=True,
+        )
 
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# ── FOOTER ─────────────────────────────────────────────────────────────────────
+# ── FOOTER ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="bs-footer">
   <div class="bs-foot-row">
