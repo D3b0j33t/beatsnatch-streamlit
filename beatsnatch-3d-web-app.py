@@ -728,18 +728,24 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
 
+    # tv / mediaconnect bypass sig/nsig JS challenges and need no PO token —
+    # they work from datacenter IPs where web/mweb/web_creator all fail.
+    # web_safari is a good fallback as it often skips the challenge too.
+    # Clients that require cookies (ios, android) are excluded here because
+    # our cookies are routinely rotated and they add no value when tv works.
     CLIENT_LADDER = [
+        ["tv"],
+        ["mediaconnect"],
+        ["web_safari"],
         ["web"],
-        ["android_music"],
-        ["tv_embedded"],
-        ["ios"],
-        ["android"],
         ["mweb"],
         ["web_creator"],
     ]
 
     base_opts: dict = {
-        "format"          : "bestaudio/best",
+        # Prefer m4a (format 140) — always available, no sig required on tv client.
+        # Fall back through opus/webm/any audio, then any format as last resort.
+        "format"          : "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
         "quiet"           : False,
         "no_warnings"     : False,
         "noplaylist"      : True,
@@ -754,8 +760,9 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
             ),
         },
     }
-    if cookie_path:
-        base_opts["cookiefile"] = cookie_path
+    # Only pass cookies for clients that actually accept them
+    COOKIE_CLIENTS = {"web", "mweb", "web_creator", "web_safari", "mediaconnect"}
+    _base_cookie_path = cookie_path  # stash for per-client use below
 
     last_err    = ""
     bot_blocked = False
@@ -771,6 +778,9 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
                 "extractor_args": {"youtube": {"player_client": clients}},
                 "logger"        : logger,
             }
+            # Only attach cookies for clients that accept them
+            if _base_cookie_path and any(c in COOKIE_CLIENTS for c in clients):
+                opts["cookiefile"] = _base_cookie_path
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([watch_url])
