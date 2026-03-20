@@ -648,15 +648,28 @@ def _convert_to_mp3(ffmpeg: str, src: str, dst: str) -> str:
     return ""
 
 
+class _YTLogger:
+    """Capture every yt-dlp log line so we can surface real errors to the user."""
+    def __init__(self):
+        self.lines: list[str] = []
+    def debug(self, msg):
+        self.lines.append(msg)
+    def info(self, msg):
+        self.lines.append(msg)
+    def warning(self, msg):
+        self.lines.append(f"[warning] {msg}")
+    def error(self, msg):
+        self.lines.append(f"[error] {msg}")
+    def full(self) -> str:
+        return "\n".join(self.lines[-60:])  # last 60 lines is plenty
+
+
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
     Two-stage pipeline:
       Stage 1 — yt-dlp downloads the raw best-audio stream (NO postprocessor).
-      Stage 2 — we invoke ffmpeg directly via subprocess to convert to MP3.
-
-    This sidesteps yt-dlp's internal postprocessor which silently swallows
-    ffmpeg errors when quiet=True, and gives us a real error message if
-    conversion fails.
+                A custom logger captures every log line so nothing is silently lost.
+      Stage 2 — ffmpeg called directly via subprocess to convert to MP3.
     """
     query    = f"ytsearch1:{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
@@ -682,17 +695,16 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
         ["web_creator"],
     ]
 
-    # ── Stage 1: raw download only — NO postprocessor, NO ffmpeg_location ──
     base_opts: dict = {
-        "format"         : "bestaudio/best",
-        # No postprocessors — we handle conversion ourselves in stage 2
-        "quiet"          : True,
-        "no_warnings"    : True,
-        "noplaylist"     : True,
-        "socket_timeout" : 20,
-        "retries"        : 3,
+        "format"          : "bestaudio/best",
+        # quiet=False + custom logger = we see everything yt-dlp does
+        "quiet"           : False,
+        "no_warnings"     : False,
+        "noplaylist"      : True,
+        "socket_timeout"  : 20,
+        "retries"         : 3,
         "fragment_retries": 3,
-        "http_headers"   : {
+        "http_headers"    : {
             "User-Agent": (
                 "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -705,13 +717,16 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
     last_err    = ""
     bot_blocked = False
+    all_logs: list[str] = []
 
     for clients in CLIENT_LADDER:
+        logger = _YTLogger()
         with tempfile.TemporaryDirectory() as tmpdir:
             opts = {
                 **base_opts,
                 "outtmpl"       : os.path.join(tmpdir, "song.%(ext)s"),
                 "extractor_args": {"youtube": {"player_client": clients}},
+                "logger"        : logger,
             }
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
@@ -720,45 +735,57 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
                 last_err = str(exc)
                 if _is_bot_error(last_err):
                     bot_blocked = True
+                all_logs.append(f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}")
                 continue
             except Exception as exc:
                 last_err = str(exc)
+                all_logs.append(f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}")
                 continue
 
             raw = _pick_raw_audio(tmpdir)
             if not raw:
-                # Download produced nothing — try next client
+                all_logs.append(f"=== client {clients} — no file produced ===\n{logger.full()}")
                 continue
 
-            # ── Stage 2: convert the raw file to MP3 via subprocess ──
+            # ── Stage 2: convert with ffmpeg directly ──
             mp3_out = os.path.join(tmpdir, "out.mp3")
             ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw, mp3_out)
-
             if ffmpeg_err:
                 st.error(
-                    f"**FFmpeg conversion failed.**\n\n"
+                    "**FFmpeg conversion failed.**\n\n"
                     f"```\n{ffmpeg_err}\n```\n\n"
-                    "This usually means the Streamlit Cloud ffmpeg build is missing "
-                    "`libmp3lame`. Add the following to your `packages.txt` and redeploy:\n"
-                    "```\nffmpeg\nlibavcodec-extra\n```"
+                    "Add `libavcodec-extra` to `packages.txt` and redeploy."
                 )
                 return None, ""
 
             with open(mp3_out, "rb") as fh:
                 return fh.read(), filename
 
-    # ── All clients exhausted ──
-    if bot_blocked or not cookie_path:
+    # ── All clients exhausted — show real logs ──
+    combined_log = "\n\n".join(all_logs)
+
+    if bot_blocked:
         st.error(
-            "**YouTube blocked the download** (bot / sign-in required).\n\n"
-            "Export your YouTube cookies with the "
-            "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
-            "Chrome extension → save as **`yt-cookies.txt`** in your repo root → commit & redeploy."
+            "**YouTube is blocking the download** (sign-in / bot check).\n\n"
+            "Your `yt-cookies.txt` may be stale — re-export it from the browser "
+            "while logged into YouTube, commit the new file, and redeploy."
+        )
+    elif not cookie_path:
+        st.error(
+            "**No cookie file found** and YouTube requires authentication.\n\n"
+            "Export cookies with "
+            "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)"
+            ", save as `yt-cookies.txt` in the repo root, commit, and redeploy."
         )
     elif last_err:
-        st.error(f"Download failed — {last_err[:400]}")
+        st.error(f"**Download failed.**\n\n```\n{last_err[:500]}\n```")
     else:
         st.error("Download failed — yt-dlp produced no audio file across all player clients.")
+
+    # Always show the captured yt-dlp log so the real cause is visible
+    if combined_log:
+        with st.expander("🔍 yt-dlp debug log (click to expand)"):
+            st.code(combined_log, language="text")
 
     return None, ""
 
