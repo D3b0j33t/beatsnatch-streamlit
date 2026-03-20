@@ -7,8 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from shazamio import Shazam
-from pytubefix import YouTube
-from pytubefix.exceptions import VideoUnavailable, AgeRestrictedError
+import yt_dlp
 from urllib.parse import quote
 
 st.set_page_config(
@@ -585,25 +584,25 @@ def _find_ffmpeg() -> str | None:
     return None
 
 
+
 def _scrape_youtube_id(title: str, artist: str) -> str | None:
-    """
-    Scrape YouTube's HTML search results page for the first video ID.
-    Uses a plain browser-style GET — works from datacenter IPs where
-    yt-dlp's innertube search API returns 0 results.
-    """
+    """Scrape YouTube HTML search page for the first video ID.
+    Works from datacenter IPs where the innertube API returns 0 results."""
     import requests as _req
     q = quote(f"{title} {artist}")
-    url = f"https://www.youtube.com/results?search_query={q}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
     try:
-        r = _req.get(url, headers=headers, timeout=15)
+        r = _req.get(
+            f"https://www.youtube.com/results?search_query={q}",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=15,
+        )
         ids = re.findall(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', r.text)
         seen: set[str] = set()
         unique = [i for i in ids if not (i in seen or seen.add(i))]
@@ -613,89 +612,176 @@ def _scrape_youtube_id(title: str, artist: str) -> str | None:
 
 
 def _convert_to_mp3(ffmpeg: str, src: str, dst: str) -> str:
-    """Convert src audio file to MP3 via a direct subprocess call.
-    Returns empty string on success, or the stderr on failure."""
+    """Convert src to 192kbps MP3 via subprocess. Returns stderr on failure."""
     result = subprocess.run(
-        [ffmpeg, "-y", "-i", src, "-vn",
-         "-ar", "44100", "-ac", "2", "-b:a", "192k", dst],
+        [ffmpeg, "-y", "-i", src, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k", dst],
         capture_output=True, text=True, timeout=120,
     )
-    if result.returncode != 0:
-        return result.stderr[-800:] or result.stdout[-800:]
-    return ""
+    return "" if result.returncode == 0 else (result.stderr[-800:] or result.stdout[-800:])
+
+
+def _oauth_token_path() -> str | None:
+    """
+    Find the OAuth2 token file (youtube-oauth2.token.json).
+    Checks:  1. Streamlit secrets  2. repo root  3. cwd
+    Returns the path to a readable token file, or None.
+    """
+    # --- Streamlit secrets: [youtube] oauth2_token = '{"token_type": ...}'
+    try:
+        token_json = st.secrets["youtube"]["oauth2_token"]
+        if token_json:
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False,
+                dir=tempfile.gettempdir(), prefix="yt_oauth_"
+            )
+            tmp.write(token_json)
+            tmp.close()
+            return tmp.name
+    except Exception:
+        pass
+
+    # --- file on disk
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for candidate in [
+        os.path.join(script_dir, "youtube-oauth2.token.json"),
+        os.path.join(os.getcwd(), "youtube-oauth2.token.json"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+class _YTLogger:
+    def __init__(self):  self.lines: list[str] = []
+    def debug(self, m):  self.lines.append(m)
+    def info(self, m):   self.lines.append(m)
+    def warning(self, m):self.lines.append(f"[warn] {m}")
+    def error(self, m):  self.lines.append(f"[err]  {m}")
+    def tail(self) -> str: return "\n".join(self.lines[-80:])
 
 
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
-    Download a YouTube audio stream using pytubefix (pure-Python cipher solver —
-    no Node.js / JS runtime required, no PO token, no cookies needed).
-
     Pipeline:
-      1. Scrape YouTube HTML search → video ID
-      2. pytubefix fetches the audio stream (solves sig in Python)
-      3. ffmpeg converts the raw audio → 192 kbps MP3
+      1. Scrape YouTube HTML search → direct watch URL  (bypasses innertube API block)
+      2. yt-dlp downloads raw audio using the tv client + OAuth2 token
+         (OAuth2 = Google device-flow auth; survives datacenter IP blocks without
+          needing PO tokens or a JS runtime)
+      3. ffmpeg converts raw audio → 192 kbps MP3
     """
-    filename  = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
+    filename    = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
     ffmpeg_path = _find_ffmpeg()
 
     if not ffmpeg_path:
-        st.error(
-            "**FFmpeg not found.**\n\n"
-            "Add `ffmpeg` and `libavcodec-extra` to `packages.txt` and redeploy."
-        )
+        st.error("**FFmpeg not found.**\n\nAdd `ffmpeg` and `libavcodec-extra` to `packages.txt` and redeploy.")
         return None, ""
 
-    # ── Stage 1: find video ID ──────────────────────────────────────────────
+    # ── Stage 1: video ID ─────────────────────────────────────────────────
     video_id = _scrape_youtube_id(title, artist)
     if not video_id:
-        st.error(
-            "**Could not find the song on YouTube.**\n\n"
-            "YouTube search returned no results — please try again."
-        )
+        st.error("**Could not find the song on YouTube** — please try again.")
         return None, ""
-
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # ── Stage 2: download raw audio via pytubefix ───────────────────────────
+    # ── Stage 2: download raw audio ───────────────────────────────────────
+    token_path = _oauth_token_path()
+    logger     = _YTLogger()
+
+    # OAuth2 plugin reads its token from {cachedir}/youtube-oauth2.token.json
+    # We write the token to a temp dir and point yt-dlp's cachedir there.
+    if token_path:
+        cache_dir = tempfile.mkdtemp(prefix="yt_cache_")
+        import shutil as _sh
+        _sh.copy2(token_path, os.path.join(cache_dir, "youtube-oauth2.token.json"))
+    else:
+        cache_dir = None
+
     with tempfile.TemporaryDirectory() as tmpdir:
+        opts: dict = {
+            "format"         : "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "outtmpl"        : os.path.join(tmpdir, "song.%(ext)s"),
+            "quiet"          : False,
+            "no_warnings"    : False,
+            "noplaylist"     : True,
+            "socket_timeout" : 20,
+            "retries"        : 3,
+            "fragment_retries": 3,
+            "logger"         : logger,
+            "extractor_args" : {"youtube": {"player_client": ["tv"]}},
+        }
+        if cache_dir:
+            opts["cachedir"] = cache_dir
+            opts["username"] = "oauth2"
+            opts["password"] = ""
+        
+        last_err = ""
         try:
-            yt = YouTube(watch_url, use_oauth=False, allow_oauth_cache=False)
-
-            # Pick the highest-bitrate audio-only stream
-            stream = (
-                yt.streams
-                  .filter(only_audio=True)
-                  .order_by("abr")
-                  .last()
-            )
-            if stream is None:
-                # Fallback: any stream at all
-                stream = yt.streams.filter(only_audio=True).first()
-            if stream is None:
-                st.error(
-                    "**No audio stream found.**\n\n"
-                    "This video may be age-restricted or unavailable in the server region."
-                )
-                return None, ""
-
-            raw_path = stream.download(output_path=tmpdir, filename="raw_audio")
-
-        except AgeRestrictedError:
-            st.error(
-                "**Age-restricted video** — pytubefix cannot download it without login.\n\n"
-                "Try a different version of the song."
-            )
-            return None, ""
-        except VideoUnavailable:
-            st.error("**Video unavailable** — it may have been removed or region-blocked.")
-            return None, ""
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([watch_url])
+        except yt_dlp.utils.DownloadError as exc:
+            last_err = str(exc)
         except Exception as exc:
-            st.error(f"**Download failed.**\n\n```\n{exc}\n```")
+            last_err = str(exc)
+
+        # Find whatever file was produced
+        raw = None
+        for ext in ("m4a", "webm", "opus", "ogg", "wav", "mp4", "mp3"):
+            hits = glob.glob(os.path.join(tmpdir, f"*.{ext}"))
+            if hits:
+                raw = hits[0]
+                break
+
+        if not raw:
+            # ── No file produced — show diagnosis ─────────────────────────
+            log_text = logger.tail()
+            if not token_path:
+                st.error(
+                    "**OAuth2 token not found.**\n\n"
+                    "YouTube blocks unauthenticated downloads from cloud servers. "
+                    "Follow the **one-time setup** below to fix this permanently."
+                )
+                with st.expander("📋 One-time OAuth2 setup (click to expand)"):
+                    st.markdown("""
+**Step 1 — install yt-dlp + oauth2 plugin locally**
+```bash
+pip install yt-dlp yt-dlp-youtube-oauth2
+```
+
+**Step 2 — authenticate (one time only)**
+```bash
+yt-dlp --username oauth2 --password '' "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+yt-dlp will print a Google device-auth URL + code. Open it in your browser and approve.
+
+**Step 3 — copy the token file into your repo**
+```bash
+# Linux / Mac
+cp ~/.cache/yt-dlp/youtube-oauth2.token.json ./youtube-oauth2.token.json
+
+# Windows
+copy %APPDATA%\\yt-dlp\\youtube-oauth2.token.json .\\youtube-oauth2.token.json
+```
+
+**Step 4 — commit & deploy**
+```bash
+git add youtube-oauth2.token.json
+git commit -m "add yt oauth2 token"
+git push
+```
+The token contains only a Google refresh token (no password). It lasts months.\n
+*Or store the file contents as a Streamlit secret:*
+`[youtube]`  
+`oauth2_token = '{"token_type":"Bearer", ...}'`
+""")
+            else:
+                st.error(f"**Download failed.**\n\n```\n{last_err[:600]}\n```")
+                with st.expander("🔍 yt-dlp log"):
+                    st.code(log_text, language="text")
             return None, ""
 
-        # ── Stage 3: convert to MP3 ─────────────────────────────────────────
-        mp3_out = os.path.join(tmpdir, "out.mp3")
-        ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw_path, mp3_out)
+        # ── Stage 3: convert to MP3 ───────────────────────────────────────
+        mp3_out   = os.path.join(tmpdir, "out.mp3")
+        ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw, mp3_out)
         if ffmpeg_err:
             st.error(
                 "**FFmpeg conversion failed.**\n\n"
@@ -706,7 +792,6 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
         with open(mp3_out, "rb") as fh:
             return fh.read(), filename
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
