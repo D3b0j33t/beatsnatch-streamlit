@@ -596,6 +596,37 @@ def _is_bot_error(err_msg: str) -> bool:
     return any(h in low for h in _BOT_HINTS)
 
 
+def _scrape_youtube_id(title: str, artist: str) -> str | None:
+    """
+    Scrape YouTube's HTML search results page to get the first video ID.
+
+    This intentionally bypasses yt-dlp's `ytsearch:` / innertube search API,
+    which returns 0 results from Streamlit Cloud's datacenter IP addresses.
+    A plain HTTPS GET to the search results page works fine from any IP.
+    """
+    import requests as _req
+    q = quote(f"{title} {artist}")
+    url = f"https://www.youtube.com/results?search_query={q}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        r = _req.get(url, headers=headers, timeout=15)
+        # YouTube embeds video metadata as JSON inside the HTML
+        ids = re.findall(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', r.text)
+        # De-duplicate while preserving order
+        seen: set[str] = set()
+        unique = [i for i in ids if not (i in seen or seen.add(i))]  # type: ignore[func-returns-value]
+        return unique[0] if unique else None
+    except Exception:
+        return None
+
+
 def _find_ffmpeg() -> str | None:
     """
     Locate the ffmpeg binary. Checks PATH first, then common fixed paths used
@@ -661,17 +692,18 @@ class _YTLogger:
     def error(self, msg):
         self.lines.append(f"[error] {msg}")
     def full(self) -> str:
-        return "\n".join(self.lines[-60:])  # last 60 lines is plenty
+        return "\n".join(self.lines[-60:])
 
 
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
-    Two-stage pipeline:
-      Stage 1 — yt-dlp downloads the raw best-audio stream (NO postprocessor).
-                A custom logger captures every log line so nothing is silently lost.
-      Stage 2 — ffmpeg called directly via subprocess to convert to MP3.
+    Three-stage pipeline:
+      Stage 0 — scrape YouTube HTML search to get a direct video ID.
+                This bypasses yt-dlp's innertube ytsearch: API which returns
+                0 results from Streamlit Cloud datacenter IPs.
+      Stage 1 — yt-dlp downloads raw best-audio from the direct watch URL.
+      Stage 2 — ffmpeg converts the raw audio to MP3 via subprocess.
     """
-    query    = f"ytsearch1:{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
 
     cookie_path = _find_cookie_file()
@@ -679,11 +711,22 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
     if not ffmpeg_path:
         st.error(
-            "**FFmpeg not found** — audio conversion requires it.\n\n"
-            "Ensure your repo root has a `packages.txt` containing:\n```\nffmpeg\n```\n"
-            "then redeploy on Streamlit Cloud."
+            "**FFmpeg not found.**\n\n"
+            "Add `ffmpeg` to `packages.txt` in your repo root and redeploy."
         )
         return None, ""
+
+    # ── Stage 0: get video ID via HTML scrape ──────────────────────────────
+    video_id = _scrape_youtube_id(title, artist)
+    if not video_id:
+        st.error(
+            "**Could not find the song on YouTube.**\n\n"
+            "The YouTube search page returned no results. "
+            "This is unusual — please try again in a moment."
+        )
+        return None, ""
+
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
 
     CLIENT_LADDER = [
         ["web"],
@@ -697,7 +740,6 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
     base_opts: dict = {
         "format"          : "bestaudio/best",
-        # quiet=False + custom logger = we see everything yt-dlp does
         "quiet"           : False,
         "no_warnings"     : False,
         "noplaylist"      : True,
@@ -719,6 +761,7 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     bot_blocked = False
     all_logs: list[str] = []
 
+    # ── Stage 1: download raw audio ────────────────────────────────────────
     for clients in CLIENT_LADDER:
         logger = _YTLogger()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -730,24 +773,30 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
             }
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([query])
+                    ydl.download([watch_url])
             except yt_dlp.utils.DownloadError as exc:
                 last_err = str(exc)
                 if _is_bot_error(last_err):
                     bot_blocked = True
-                all_logs.append(f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}")
+                all_logs.append(
+                    f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}"
+                )
                 continue
             except Exception as exc:
                 last_err = str(exc)
-                all_logs.append(f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}")
+                all_logs.append(
+                    f"=== client {clients} ===\n{logger.full()}\nexc: {last_err}"
+                )
                 continue
 
             raw = _pick_raw_audio(tmpdir)
             if not raw:
-                all_logs.append(f"=== client {clients} — no file produced ===\n{logger.full()}")
+                all_logs.append(
+                    f"=== client {clients} — no file produced ===\n{logger.full()}"
+                )
                 continue
 
-            # ── Stage 2: convert with ffmpeg directly ──
+            # ── Stage 2: convert to MP3 ────────────────────────────────────
             mp3_out = os.path.join(tmpdir, "out.mp3")
             ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw, mp3_out)
             if ffmpeg_err:
@@ -761,28 +810,28 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
             with open(mp3_out, "rb") as fh:
                 return fh.read(), filename
 
-    # ── All clients exhausted — show real logs ──
+    # ── All clients exhausted ──────────────────────────────────────────────
     combined_log = "\n\n".join(all_logs)
 
     if bot_blocked:
         st.error(
             "**YouTube is blocking the download** (sign-in / bot check).\n\n"
-            "Your `yt-cookies.txt` may be stale — re-export it from the browser "
+            "Your `yt-cookies.txt` is stale — re-export it from the browser "
             "while logged into YouTube, commit the new file, and redeploy."
         )
     elif not cookie_path:
         st.error(
             "**No cookie file found** and YouTube requires authentication.\n\n"
             "Export cookies with "
-            "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)"
+            "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/"
+            "get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)"
             ", save as `yt-cookies.txt` in the repo root, commit, and redeploy."
         )
     elif last_err:
         st.error(f"**Download failed.**\n\n```\n{last_err[:500]}\n```")
     else:
-        st.error("Download failed — yt-dlp produced no audio file across all player clients.")
+        st.error("**Download failed** — yt-dlp produced no audio file across all player clients.")
 
-    # Always show the captured yt-dlp log so the real cause is visible
     if combined_log:
         with st.expander("🔍 yt-dlp debug log (click to expand)"):
             st.code(combined_log, language="text")
