@@ -614,32 +614,49 @@ def _find_ffmpeg() -> str | None:
     return next((p for p in fixed if os.path.isfile(p)), None)
 
 
-def _pick_audio_file(tmpdir: str) -> str | None:
-    """
-    Return the first audio file produced in tmpdir, preferring .mp3.
-    Glob-based so we handle any extension yt-dlp or ffmpeg may produce.
-    """
-    preferred = os.path.join(tmpdir, "song.mp3")
-    if os.path.exists(preferred):
-        return preferred
-    for ext in ("mp3", "m4a", "opus", "webm", "ogg", "wav"):
+def _pick_raw_audio(tmpdir: str) -> str | None:
+    """Return the first raw audio file yt-dlp downloaded (before any conversion)."""
+    for ext in ("webm", "m4a", "opus", "ogg", "wav", "mp3", "mp4"):
         hits = glob.glob(os.path.join(tmpdir, f"*.{ext}"))
         if hits:
             return hits[0]
     return None
 
 
+def _convert_to_mp3(ffmpeg: str, src: str, dst: str) -> str:
+    """
+    Run ffmpeg directly via subprocess to convert src → dst (mp3 192k).
+    Returns "" on success, or the stderr output on failure.
+    """
+    import subprocess
+    result = subprocess.run(
+        [
+            ffmpeg, "-y",
+            "-i", src,
+            "-vn",                   # drop video stream
+            "-ar", "44100",          # sample rate
+            "-ac", "2",              # stereo
+            "-b:a", "192k",          # bitrate
+            dst,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        return result.stderr[-600:] or result.stdout[-600:]
+    return ""
+
+
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
-    Search YouTube for `title artist`, download best audio, convert to MP3.
+    Two-stage pipeline:
+      Stage 1 — yt-dlp downloads the raw best-audio stream (NO postprocessor).
+      Stage 2 — we invoke ffmpeg directly via subprocess to convert to MP3.
 
-    Strategy
-    --------
-    1.  Explicitly locate ffmpeg so yt-dlp's postprocessor never silently fails.
-    2.  Try every player client in CLIENT_LADDER until one works.
-    3.  Apply cookie file to every attempt if one is found.
-    4.  Use glob-based file discovery to catch any output extension.
-    5.  Show a clear, actionable error on failure.
+    This sidesteps yt-dlp's internal postprocessor which silently swallows
+    ffmpeg errors when quiet=True, and gives us a real error message if
+    conversion fails.
     """
     query    = f"ytsearch1:{title} {artist} audio"
     filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
@@ -649,10 +666,9 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
 
     if not ffmpeg_path:
         st.error(
-            "**FFmpeg not found** — audio conversion is impossible without it.\n\n"
-            "Make sure your repo has a `packages.txt` file in the root with one line:\n"
-            "```\nffmpeg\n```\n"
-            "Then redeploy the app on Streamlit Cloud."
+            "**FFmpeg not found** — audio conversion requires it.\n\n"
+            "Ensure your repo root has a `packages.txt` containing:\n```\nffmpeg\n```\n"
+            "then redeploy on Streamlit Cloud."
         )
         return None, ""
 
@@ -666,23 +682,17 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
         ["web_creator"],
     ]
 
+    # ── Stage 1: raw download only — NO postprocessor, NO ffmpeg_location ──
     base_opts: dict = {
         "format"         : "bestaudio/best",
-        "postprocessors" : [{
-            "key"             : "FFmpegExtractAudio",
-            "preferredcodec"  : "mp3",
-            "preferredquality": "192",
-        }],
-        # Explicitly pass ffmpeg path — critical on Streamlit Cloud
-        "ffmpeg_location" : ffmpeg_path,
-        "prefer_ffmpeg"   : True,
-        "quiet"           : True,
-        "no_warnings"     : True,
-        "noplaylist"      : True,
-        "socket_timeout"  : 20,
-        "retries"         : 3,
+        # No postprocessors — we handle conversion ourselves in stage 2
+        "quiet"          : True,
+        "no_warnings"    : True,
+        "noplaylist"     : True,
+        "socket_timeout" : 20,
+        "retries"        : 3,
         "fragment_retries": 3,
-        "http_headers"    : {
+        "http_headers"   : {
             "User-Agent": (
                 "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -690,7 +700,6 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
             ),
         },
     }
-
     if cookie_path:
         base_opts["cookiefile"] = cookie_path
 
@@ -707,12 +716,6 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([query])
-
-                found = _pick_audio_file(tmpdir)
-                if found:
-                    with open(found, "rb") as fh:
-                        return fh.read(), filename
-
             except yt_dlp.utils.DownloadError as exc:
                 last_err = str(exc)
                 if _is_bot_error(last_err):
@@ -722,22 +725,40 @@ def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
                 last_err = str(exc)
                 continue
 
-    # ── All clients failed — show the most helpful error possible ──
+            raw = _pick_raw_audio(tmpdir)
+            if not raw:
+                # Download produced nothing — try next client
+                continue
+
+            # ── Stage 2: convert the raw file to MP3 via subprocess ──
+            mp3_out = os.path.join(tmpdir, "out.mp3")
+            ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw, mp3_out)
+
+            if ffmpeg_err:
+                st.error(
+                    f"**FFmpeg conversion failed.**\n\n"
+                    f"```\n{ffmpeg_err}\n```\n\n"
+                    "This usually means the Streamlit Cloud ffmpeg build is missing "
+                    "`libmp3lame`. Add the following to your `packages.txt` and redeploy:\n"
+                    "```\nffmpeg\nlibavcodec-extra\n```"
+                )
+                return None, ""
+
+            with open(mp3_out, "rb") as fh:
+                return fh.read(), filename
+
+    # ── All clients exhausted ──
     if bot_blocked or not cookie_path:
         st.error(
             "**YouTube blocked the download** (bot / sign-in required).\n\n"
-            "**Fix:** export your YouTube cookies with the "
+            "Export your YouTube cookies with the "
             "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
-            "Chrome extension, save the file as **`yt-cookies.txt`** in the same "
-            "folder as `app.py`, commit it, then redeploy."
+            "Chrome extension → save as **`yt-cookies.txt`** in your repo root → commit & redeploy."
         )
     elif last_err:
-        st.error(f"Download failed — {last_err[:300]}")
+        st.error(f"Download failed — {last_err[:400]}")
     else:
-        st.error(
-            f"Download failed — ffmpeg found at `{ffmpeg_path}` but produced no output. "
-            "Check that the ffmpeg build supports mp3 encoding (libmp3lame)."
-        )
+        st.error("Download failed — yt-dlp produced no audio file across all player clients.")
 
     return None, ""
 
