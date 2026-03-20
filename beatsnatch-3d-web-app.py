@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from shazamio import Shazam
-import yt_dlp
+import requests
 from urllib.parse import quote
 
 st.set_page_config(
@@ -568,26 +568,9 @@ def recognize_song(audio_bytes: bytes):
         os.unlink(tmp)
 
 
-def _find_ffmpeg() -> str | None:
-    """Locate the ffmpeg binary via PATH then common fixed locations."""
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    for p in [
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/opt/conda/bin/ffmpeg",
-        "/home/appuser/.local/bin/ffmpeg",
-    ]:
-        if os.path.isfile(p):
-            return p
-    return None
-
-
 
 def _scrape_youtube_id(title: str, artist: str) -> str | None:
-    """Scrape YouTube HTML search page for the first video ID.
-    Works from datacenter IPs where the innertube API returns 0 results."""
+    """Scrape YouTube HTML search results for the first video ID."""
     import requests as _req
     q = quote(f"{title} {artist}")
     try:
@@ -611,190 +594,152 @@ def _scrape_youtube_id(title: str, artist: str) -> str | None:
         return None
 
 
-def _convert_to_mp3(ffmpeg: str, src: str, dst: str) -> str:
-    """Convert src to 192kbps MP3 via subprocess. Returns stderr on failure."""
-    result = subprocess.run(
-        [ffmpeg, "-y", "-i", src, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k", dst],
-        capture_output=True, text=True, timeout=120,
-    )
-    return "" if result.returncode == 0 else (result.stderr[-800:] or result.stdout[-800:])
-
-
-def _oauth_token_path() -> str | None:
+def _cobalt_download(watch_url: str) -> bytes | None:
     """
-    Find the OAuth2 token file (youtube-oauth2.token.json).
-    Checks:  1. Streamlit secrets  2. repo root  3. cwd
-    Returns the path to a readable token file, or None.
+    Use the cobalt.tools public API to get a direct audio stream URL,
+    then download and return the raw audio bytes.
+    cobalt is open-source (github.com/imputnet/cobalt) and free with no API key.
     """
-    # --- Streamlit secrets: [youtube] oauth2_token = '{"token_type": ...}'
+    import requests as _req
+    COBALT_API = "https://api.cobalt.tools/"
+    headers = {
+        "Accept":       "application/json",
+        "Content-Type": "application/json",
+        "User-Agent":   "BeatSnatch/1.0",
+    }
+    payload = {
+        "url":          watch_url,
+        "downloadMode": "audio",
+        "audioFormat":  "mp3",
+        "audioBitrate": "192",
+    }
     try:
-        token_json = st.secrets["youtube"]["oauth2_token"]
-        if token_json:
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".json", delete=False,
-                dir=tempfile.gettempdir(), prefix="yt_oauth_"
-            )
-            tmp.write(token_json)
-            tmp.close()
-            return tmp.name
+        r = _req.post(COBALT_API, json=payload, headers=headers, timeout=30)
+        data = r.json()
+        # cobalt returns {"status":"tunnel"|"redirect"|"stream", "url":"..."}
+        if data.get("status") in ("tunnel", "redirect", "stream", "picker") and data.get("url"):
+            audio = _req.get(data["url"], timeout=120, stream=True)
+            audio.raise_for_status()
+            return audio.content
+        # picker = multiple streams (rare for audio-only)
+        if data.get("status") == "picker" and data.get("picker"):
+            audio = _req.get(data["picker"][0]["url"], timeout=120, stream=True)
+            audio.raise_for_status()
+            return audio.content
     except Exception:
         pass
-
-    # --- file on disk
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    for candidate in [
-        os.path.join(script_dir, "youtube-oauth2.token.json"),
-        os.path.join(os.getcwd(), "youtube-oauth2.token.json"),
-    ]:
-        if os.path.isfile(candidate):
-            return candidate
     return None
 
 
-class _YTLogger:
-    def __init__(self):  self.lines: list[str] = []
-    def debug(self, m):  self.lines.append(m)
-    def info(self, m):   self.lines.append(m)
-    def warning(self, m):self.lines.append(f"[warn] {m}")
-    def error(self, m):  self.lines.append(f"[err]  {m}")
-    def tail(self) -> str: return "\n".join(self.lines[-80:])
+def _y2mate_download(video_id: str) -> bytes | None:
+    """
+    Fallback: use the y2mate.com API to get an MP3 download URL.
+    Step 1 — analyse the video and get a conversion key.
+    Step 2 — request the conversion and get the direct download URL.
+    Step 3 — download and return the bytes.
+    """
+    import requests as _req
+    BASE = "https://www.y2mate.com/yt1"
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.y2mate.com/",
+        "Origin":  "https://www.y2mate.com",
+    }
+    try:
+        # Step 1: analyse
+        r1 = _req.post(
+            f"{BASE}/api/ajaxSearch/index",
+            data={"q": f"https://www.youtube.com/watch?v={video_id}", "vt": "home"},
+            headers=HEADERS,
+            timeout=20,
+        )
+        data1 = r1.json()
+        # Extract the mp3 128 key from the HTML blob
+        match = re.search(r'k__id.*?value="([^"]+)"', data1.get("result", ""))
+        if not match:
+            # Try alternate pattern for key
+            match = re.search(r'"mp3".*?"k__id":"([^"]+)"', data1.get("result", ""), re.S)
+        if not match:
+            return None
+        key = match.group(1)
+
+        # Step 2: convert
+        r2 = _req.post(
+            f"{BASE}/api/ajaxConvert/convert",
+            data={
+                "type":     "youtube",
+                "_id":      video_id,
+                "v_id":     video_id,
+                "ajax":     "1",
+                "token":    "",
+                "ftype":    "mp3",
+                "fquality": "128",
+                "k__id":    key,
+            },
+            headers=HEADERS,
+            timeout=30,
+        )
+        data2 = r2.json()
+        dl_url = data2.get("dlink") or re.search(r'"dlink":"([^"]+)"', r2.text)
+        if not dl_url:
+            return None
+        if not isinstance(dl_url, str):
+            dl_url = dl_url.group(1).replace("\\", "")
+
+        # Step 3: download
+        audio = _req.get(dl_url, headers=HEADERS, timeout=120, stream=True)
+        audio.raise_for_status()
+        return audio.content
+    except Exception:
+        return None
 
 
 def download_mp3_bytes(title: str, artist: str) -> tuple[bytes | None, str]:
     """
+    Download MP3 audio by routing through a third-party converter service.
+
     Pipeline:
-      1. Scrape YouTube HTML search → direct watch URL  (bypasses innertube API block)
-      2. yt-dlp downloads raw audio using the tv client + OAuth2 token
-         (OAuth2 = Google device-flow auth; survives datacenter IP blocks without
-          needing PO tokens or a JS runtime)
-      3. ffmpeg converts raw audio → 192 kbps MP3
+      1. Scrape YouTube HTML search -> video ID / watch URL
+      2. Try cobalt.tools API  (primary  — open-source, no key, no rate limit for personal use)
+      3. Try y2mate API        (fallback — widely used YouTube-to-MP3 service)
+
+    No yt-dlp, no ffmpeg, no OAuth tokens required.
+    The converter service handles all YouTube auth/sig on their servers.
     """
-    filename    = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
-    ffmpeg_path = _find_ffmpeg()
+    filename = sanitize(f"{title} - {artist or 'Unknown'}.mp3")
 
-    if not ffmpeg_path:
-        st.error("**FFmpeg not found.**\n\nAdd `ffmpeg` and `libavcodec-extra` to `packages.txt` and redeploy.")
-        return None, ""
-
-    # ── Stage 1: video ID ─────────────────────────────────────────────────
+    # ── Stage 1: get video ID ─────────────────────────────────────────────
     video_id = _scrape_youtube_id(title, artist)
     if not video_id:
-        st.error("**Could not find the song on YouTube** — please try again.")
+        st.error("**Could not find the song on YouTube.** Please try again.")
         return None, ""
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # ── Stage 2: download raw audio ───────────────────────────────────────
-    token_path = _oauth_token_path()
-    logger     = _YTLogger()
+    # ── Stage 2: cobalt.tools ─────────────────────────────────────────────
+    data = _cobalt_download(watch_url)
+    if data and len(data) > 10_000:          # sanity check: >10 KB means real audio
+        return data, filename
 
-    # OAuth2 plugin reads its token from {cachedir}/youtube-oauth2.token.json
-    # We write the token to a temp dir and point yt-dlp's cachedir there.
-    if token_path:
-        cache_dir = tempfile.mkdtemp(prefix="yt_cache_")
-        import shutil as _sh
-        _sh.copy2(token_path, os.path.join(cache_dir, "youtube-oauth2.token.json"))
-    else:
-        cache_dir = None
+    # ── Stage 3: y2mate fallback ──────────────────────────────────────────
+    data = _y2mate_download(video_id)
+    if data and len(data) > 10_000:
+        return data, filename
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        opts: dict = {
-            "format"         : "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-            "outtmpl"        : os.path.join(tmpdir, "song.%(ext)s"),
-            "quiet"          : False,
-            "no_warnings"    : False,
-            "noplaylist"     : True,
-            "socket_timeout" : 20,
-            "retries"        : 3,
-            "fragment_retries": 3,
-            "logger"         : logger,
-            "extractor_args" : {"youtube": {"player_client": ["tv"]}},
-        }
-        if cache_dir:
-            opts["cachedir"] = cache_dir
-            opts["username"] = "oauth2"
-            opts["password"] = ""
-        
-        last_err = ""
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([watch_url])
-        except yt_dlp.utils.DownloadError as exc:
-            last_err = str(exc)
-        except Exception as exc:
-            last_err = str(exc)
-
-        # Find whatever file was produced
-        raw = None
-        for ext in ("m4a", "webm", "opus", "ogg", "wav", "mp4", "mp3"):
-            hits = glob.glob(os.path.join(tmpdir, f"*.{ext}"))
-            if hits:
-                raw = hits[0]
-                break
-
-        if not raw:
-            # ── No file produced — show diagnosis ─────────────────────────
-            log_text = logger.tail()
-            if not token_path:
-                st.error(
-                    "**OAuth2 token not found.**\n\n"
-                    "YouTube blocks unauthenticated downloads from cloud servers. "
-                    "Follow the **one-time setup** below to fix this permanently."
-                )
-                with st.expander("📋 One-time OAuth2 setup (click to expand)"):
-                    st.markdown("""
-**Step 1 — install yt-dlp + oauth2 plugin locally**
-```bash
-pip install yt-dlp yt-dlp-youtube-oauth2
-```
-
-**Step 2 — authenticate (one time only)**
-```bash
-yt-dlp --username oauth2 --password '' "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-```
-yt-dlp will print a Google device-auth URL + code. Open it in your browser and approve.
-
-**Step 3 — copy the token file into your repo**
-```bash
-# Linux / Mac
-cp ~/.cache/yt-dlp/youtube-oauth2.token.json ./youtube-oauth2.token.json
-
-# Windows
-copy %APPDATA%\\yt-dlp\\youtube-oauth2.token.json .\\youtube-oauth2.token.json
-```
-
-**Step 4 — commit & deploy**
-```bash
-git add youtube-oauth2.token.json
-git commit -m "add yt oauth2 token"
-git push
-```
-The token contains only a Google refresh token (no password). It lasts months.\n
-*Or store the file contents as a Streamlit secret:*
-`[youtube]`  
-`oauth2_token = '{"token_type":"Bearer", ...}'`
-""")
-            else:
-                st.error(f"**Download failed.**\n\n```\n{last_err[:600]}\n```")
-                with st.expander("🔍 yt-dlp log"):
-                    st.code(log_text, language="text")
-            return None, ""
-
-        # ── Stage 3: convert to MP3 ───────────────────────────────────────
-        mp3_out   = os.path.join(tmpdir, "out.mp3")
-        ffmpeg_err = _convert_to_mp3(ffmpeg_path, raw, mp3_out)
-        if ffmpeg_err:
-            st.error(
-                "**FFmpeg conversion failed.**\n\n"
-                f"```\n{ffmpeg_err}\n```\n\n"
-                "Add `libavcodec-extra` to `packages.txt` and redeploy."
-            )
-            return None, ""
-
-        with open(mp3_out, "rb") as fh:
-            return fh.read(), filename
+    st.error(
+        "**Both download services failed.**\n\n"
+        "This can happen if:\n"
+        "- The song is very new or region-restricted\n"
+        "- cobalt.tools or y2mate is temporarily down\n\n"
+        "Try again in a moment, or try a different song."
+    )
+    return None, ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
 for _k, _v in {"song": None, "mp3_bytes": None, "mp3_filename": ""}.items():
